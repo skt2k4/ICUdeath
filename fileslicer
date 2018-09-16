@@ -1,0 +1,68 @@
+import numpy as np
+import pandas as pd
+import os
+
+def changedirectory():
+	#PURPOSE: Opens the directory that includes cases, controls in \case and \ctrl
+	os.chdir(r'C:\Users\saumi\Dropbox\My Documents\Research\Cardiac death')
+	print("new cwd")
+	print(os.getcwd())
+
+
+def createdfmetadata(df, filename,iscase):
+	#PURPOSE: Take pandas data frame and create metadata for case number, time of death
+	# 1. Add casenumber column
+	# 2. Add time of death (either a TIMESTAMP(death time) or TIMESTAMP(0))
+	# 3. To compute #2, it drops empty time points from the series
+	#INPUT: Fresh xlsx file, filename, iscase = 1 if case, 0 if ctrl
+	#OUTPUT: Reformatted excel sheet
+	df = df.dropna(axis=0,how='all',thresh=10)
+	length = len(df['Time'])
+	#add filename to file
+	#input files will be in format casenum_filtername
+	#e.g., 140242_postRR5minavg_elim1annotation_nec52p100
+	casenamestring = filename.split('_')[0] #everything before first _
+	df = df.assign(casename=casenamestring) #creates casename metadata
+
+	#add timeofdeath column
+	timeofdeatharray = np.zeros(length)
+	if iscase == 1: #assumes last data point is time of death
+		timeofdeath = df['Time'][length-1]
+		df = df.assign(deathtime=timeofdeath)
+	else:
+		timedeltazero = df['Time'][0] - df['Time'][0]
+		df = df.assign(deathtime=timedeltazero)
+	return df
+
+def casefolder():
+	# Processes cases
+	cwd = os.getcwd()
+	cwd = cwd+r'\\case'
+	os.chdir(cwd)
+	filelist=os.listdir(cwd)
+	iscase = 1
+	for i in filelist:
+		dftemp = pandas.read_excel(i)
+		# ... format, metadata for dftemp
+		# ... 
+
+
+
+def main():
+	changedirectory() #Takes you to cardiac death folder
+	casefolder()
+
+
+	# Open case, ctrl folders
+	# Per file,
+	# - - - Create metadata
+	# - - - Concatenate with master file
+
+
+
+
+
+
+
+if __name__ == '__main__':
+		main()
