@@ -1,0 +1,615 @@
+import numpy as np
+import pandas as pd
+import os
+from sklearn import preprocessing
+import pickle
+
+def pickledict(dict, name):
+	#PURPOSE: save dict as pickle
+	#INPUT: dict to be save, name to use
+	#RETURN: none
+
+	pickle_out = open(name,"wb")
+	pickle.dump(dict, pickle_out)
+	pickle_out.close()
+
+def savendarray(array,arrayname):
+	#PURPOSE: Save np ndarray
+	#INPUT: ndarray, desired name
+	df = pd.DataFrame(array)
+	savedf(df,arrayname)
+
+def savenpy(df,name):
+	#PURPOSE: Saves ndarray df as name.npy
+	np.save(str(name)+'.npy', df)
+
+def loadnpy(name):
+	df = np.load(str(name)+'.npy')
+	return df
+
+def savedf(df,dfname):
+	#Save df and pickle it
+	(df, dfname) #debug, for editing later
+	df.to_pickle("./" + dfname + ".pkl")
+
+
+def loadpickle(filename):
+	#PURPOSE: Loads pickle from same directory
+	#INPUT: file name
+	#OUTPUT: the unpickled file
+	pickledfile = pickle.load( open( filename, "rb" ) )
+	return pickledfile
+
+def writedftocsv(df,dfname):
+	#Purpose: simple way to visualize a df for debugging
+	#Input: df
+	#Output: none, creates csv sheet in cwd
+	df.to_csv(dfname+".csv",sep=',')
+	print(dfname+" created")
+
+def changedirectory():
+	#PURPOSE: Opens the directory that includes cases, controls in \case and \ctrl
+	os.chdir(r'C:\Users\saumi\Dropbox\My Documents\Research\Cardiac death')
+	print("new cwd")
+	print(os.getcwd())
+
+def convertfilenametocasenum(filename):
+	#Purpose: converts filename to casenum
+	#INPUT: filename
+	#Returns: casenum
+	#input files will be in format casenum_filtername
+	#e.g., 140242_postRR5minavg_elim1annotation_nec52p100
+	casenamestring = filename.split('_')[0] #everything before first _
+	return casenamestring
+
+def createdfmetadata(df, filename,iscase,deathlist):
+	#PURPOSE: Take pandas data frame and create metadata for case number, time of death
+	# 1. Add casenum column
+	# 2. Add time of death (either a TIMESTAMP(death time) or for ctrls TIMESTAMP('2100-01-01 11:00:00'))
+
+	#INPUT: Fresh xlsx file, filename, iscase = 1 if case, 0 if ctrl
+	#OUTPUT: Reformatted excel sheet
+
+	#DATA INTERPOLATION #LATER, make modular and separate from this function
+	#df = df.dropna(axis=1,how='all',thresh=0) #Drops rows with empty values. 
+	#df = df.dropna(axis=0,how='all') #Drop cols with less than 10 values. 
+
+
+	#add casenum
+	#input files will be in format casenum_filtername
+	#e.g., 140242_postRR5minavg_elim1annotation_nec52p100
+	casenamestring = convertfilenametocasenum(filename) #everything before first _
+	df = df.assign(casename=casenamestring) #creates casename metadata
+
+	#add timeofdeath column
+
+	if iscase == 1:
+		timeofdeath = deathlist.loc[deathlist['Case']==int(casenamestring)]['Date of arrest from ECG Tracings']
+		timeofdeath = timeofdeath.iat[0]
+		df = df.assign(deathtime=timeofdeath)
+
+
+	else:
+		df = df.assign(deathtime=pd.Timestamp('2100-01-01 11:00:00'))
+	return df
+
+def accumulatecasenumlabels (db, filename, iscase):
+	#INPUT: casenumlabels (mx2 array of casenum, label)
+	#INPUT: filename
+	#INPUT: iscase
+	#return: casenumlabels w/ new row appended
+	casenum = convertfilenametocasenum(filename)
+	casenum = int(casenum)
+	db = np.vstack([db,[casenum,iscase]])
+	return db
+
+
+def dropnas(casedf):
+	#PURPOSE: Drops rows, columns w/ empty values
+	#INPUT: casedf, a pd df
+	#Return: casedf with dropped rows, columns
+	casedf.dropna(axis=1,thresh=10, inplace=True) #Drops erroneous columns
+	casedf.dropna(axis=0,thresh=0, inplace=True) #Drops rows with empty values. 
+	#casedf.dropna(axis=1,thresh=0, inplace=True) #Drops columns, in theory this step is redundant
+	return casedf
+
+
+def removeuniquectrlcolumns(casedf,uniquectrlcolumns):
+	#PURPOSE: Drops columns from casedf contained in uniquectrlcolumns
+	#INPUT: casedf, accumulated case and ctrl rows
+	#INPUT: uniquectrlcolumns, a set object of columsn in ctrl but not case
+	#RETURN: casedf with those columns dropped
+	if len(uniquectrlcolumns)>0:
+		for i in uniquectrlcolumns:
+			casedf = casedf.drop(columns=i)
+		return casedf
+	else:
+		return casedf
+
+
+def protobuff(homedir):
+	#Purpose: Crawl through case, ctrl folders
+	#Purpose: Read files into common df
+	#Purpose: calls fxn to add casenum, time of death, remove whitespace
+	#Purpose: Removes redundant time.1 column
+	#INPUT: homedir, the directory where the case files are
+	#Returns: protobuff df (no labels), casenumlabels (mx2 array, casenunm, label)
+	cwd = os.getcwd()
+	deathlist = pd.read_excel('Time of death list.xlsx')
+
+
+	# Generates cases in one db
+
+	casenumlabels = np.ndarray([0,2]) # m x 2 array of casenum, label
+	casedir = cwd+r'\\case'
+	ctrldir = cwd+r'\\ctrl'
+	casedf = pd.DataFrame()
+	os.chdir(casedir)
+	iscase = 1
+	filelist=os.listdir(casedir)
+	for i in filelist:
+		print("reading case file "+str(i))
+		#log casenum and label
+		casenumlabels = accumulatecasenumlabels(casenumlabels,i,iscase)
+		dftemp = pd.read_excel(i)
+		dftemp = dftemp.fillna(method='ffill',axis=0,limit=60) #Goes down columns and forward-fills values, only propagates one value limit times
+		dftemp = dropnas(dftemp)
+		# ... format, metadata for dftemp
+		try:
+			dftemp = createdfmetadata(dftemp,i,iscase,deathlist)
+
+			#try: #casedf is the accumulated database. if it doesn't exist, it gets initialized
+			casedf = casedf.append(dftemp,sort='True')
+			print(casedf.shape)
+			#except NameError:
+				#casedf = dftemp
+				#print("casedf created")
+		except IndexError: #nothing, skip forward
+			print("filename "+str(i)+" was omitted")
+		#Next: Concatenate dftemp to some kind of accumulated df
+	
+	print(casedf.isna().sum())
+	casedf = dropnas(casedf)
+	print("dropped empty case values")
+	print(casedf.isna().sum())
+	print("case processing completed")
+	
+	#for debug
+	casecolumns = casedf.columns
+	casecolumns = set(casecolumns)
+
+	# Processes ctrls
+	os.chdir(ctrldir)
+	iscase = 0
+	filelist=os.listdir(ctrldir)
+
+	#debug code, remove later
+	debugi = filelist[0]
+	dftemp = pd.read_excel(debugi)
+	dftemp = dropnas(dftemp)
+	ctrlcolumns = dftemp.columns
+	ctrlcolumns = set(ctrlcolumns)
+	uniquectrlcolums = ctrlcolumns.difference(casecolumns)
+	print(uniquectrlcolums)
+
+	for i in filelist:
+		print("reading ctrl file "+str(i))
+		#log casenum and label
+		casenumlabels = accumulatecasenumlabels(casenumlabels,i,iscase)
+
+		dftemp = pd.read_excel(i)
+		dftemp = dftemp.fillna(method='ffill',axis=0,limit=60) #Goes down columns and forward-fills values, only propagates one value limit times
+		# ... format, metadata for dftemp
+		dftemp = dropnas(dftemp)
+		dftemp = createdfmetadata(dftemp,i,iscase,deathlist)
+		#casedf is the accumulated database. if it doesn't exist, it gets initialized
+		casedf = casedf.append(dftemp,sort='True')
+		print(casedf.shape)
+	#Drop empty columns
+	os.chdir(homedir)
+	print("case df shape before dropping unique ctrl columns is "+str(casedf.shape))
+	casedf = removeuniquectrlcolumns(casedf,uniquectrlcolums) # Drops columns in ctrl but no t cases
+	print("casedf shape after dropping unique ctrl columns is "+str(casedf.shape))
+	casedf = casedf.dropna(axis=1,thresh=10) #Drops erroneous columns
+	casedf = casedf.dropna(axis=0) #Drops rows with empty values. 
+	#casedf = casedf.dropna(axis=1) #Drops columns, in theory this step is redundant
+	print(casedf.isna().sum())
+	#Drop redundant Time column. Rows dropped elsewhere in metadata function
+	try:
+		casedf = casedf.drop(columns='Time.1')
+	except:
+		print("column error")
+		print(str(casedf.columns))
+	casedf.Time = casedf.Time.dt.to_pydatetime()
+	print("casedf shape is "+str(casedf.shape))
+	print("casedf columns include "+str(casedf.columns))
+	return casedf, casenumlabels
+
+
+def labelformula(time,deathtime,lentime):
+	#PURPOSE: for a given time, time of death, and length, will specify if death occurs within len time
+	#Inputs: time now, time of death, lentime
+	#Output: 0/1 label
+	lentime = str(lentime)
+	#NOTE that for cases w/o cardiac death, deathtime is set to year 2100
+	deltatime = deathtime - time
+
+	if deltatime <= pd.Timedelta(lentime+'m') and deltatime > pd.Timedelta(0):
+		return 1
+	else:
+		return 0
+
+
+def labeldata(casedf,labelname,lentime):
+	'''
+	PURPOSE: takes protobuff data
+	casedf: in protobuff format (w/ label, ready for reshape and feed)
+	labelname: name of new column
+	lentime: period within which death occurs
+	'''
+	casedf[labelname] = casedf.apply(lambda row: labelformula(row['Time'],row['deathtime'],lentime), axis=1)
+	return casedf
+
+def removetimesafterdeath(df):
+	#Input: Receive df with deathtime, Time
+	#Purpose: If Time > deathtime, then delete row
+	#Return: df with those rows removed
+	df = df[df.Time - df.deathtime < pd.Timedelta(0)]
+	return df
+
+
+def shufflesplitdb(db,splitfraction):
+	#PURPOSE: take db, shuffle it, split fraction and return it
+	#INPUT: db (mx2), % to go into second db
+	#RETURN: the split db, split by % (e.g., if 80%, 80% in second db)
+	np.random.shuffle(db)
+	dblength = db.shape[0]
+	numcasesinsplit = int(np.floor(dblength*splitfraction))
+	numcasesinsplit = -1 * numcasesinsplit
+	splitdb1, splitdb2 = np.vsplit(db,[numcasesinsplit])
+	return splitdb1, splitdb2
+
+def separatelabels(db, casetestfraction, ctrltestfraction):
+	#PURPOSE: convert casenumlabels into traindblabels, testdblabels
+	#Inputs: casenumlabels as db, % cases to be in test set, % ctrls to be in test set
+	#Returns: testdb, traindb (mix of cases and ctrls, labels in place if originally in place)
+	casemask = ((db[:,1]==1))
+	ctrlmask = ((db[:,1] == 0))
+	casedb = db[casemask] # Holds cases
+	ctrldb = db[ctrlmask] # Holds ctrls
+	traincasedb, testcasedb = shufflesplitdb(casedb, casetestfraction)
+	trainctrldb, testctrldb = shufflesplitdb(ctrldb, ctrltestfraction)
+	
+	traindb = np.vstack([traincasedb,trainctrldb])
+	testdb = np.vstack([testcasedb,testctrldb])
+	return traindb, testdb
+
+
+def selectcasesfromdf(df,casenum):
+	#PURPOSE: Returns only rows with corresponding casenum to that provided
+	#INPUT: df, a df of cases, and casenum, a string of an integer case number
+	#OUTPUT: df of selected rows
+	subsetdf = df.loc[df.casename==casenum]
+	return subsetdf
+
+def splitcasedf(df,trainlabels,testlabels):
+	#PURPOSE: take casedf and return df of training, testing data
+	#INPUT: casedf as df, traindflabels as trainlabels, testdflabels as testlabels
+	#INPUT: trainlabels, testlabels are mx2 ndarrays of casenum, label
+	#OUTPUT: traindf, testdf
+	#FYI: casenum is at df.casename, and the casename is a str despite being integers
+	colnames = list(df)
+	traindf = pd.DataFrame(columns=colnames) #blank df with matching columns
+	testdf = pd.DataFrame(columns=colnames) #blank df with matching columns
+
+	for i in trainlabels[:,0]:
+		casenumstr = str(int(i))
+		subsetdf = selectcasesfromdf(df,casenumstr)
+		traindf = traindf.append(subsetdf)
+
+	for i in testlabels[:,0]:
+		casenumstr = str(int(i))
+		subsetdf = selectcasesfromdf(df,casenumstr)
+		testdf = testdf.append(subsetdf)
+	return traindf, testdf
+
+def makebatchfromdf(df,timesperbatch,i):
+	'''
+	PURPOSE: take i through the next timesperbatch-1 cases in df
+	PURPOSE: generate a [timestamps, features] array
+	PURPOSE: return [timestamps, features] array
+	INPUT: df, a pandas df
+	Output: a [timestamps,features] ndarray
+	TODO: Isolate the subset of df, remove erroneous columns, convert to NP array, output
+	'''
+	#isolate columns
+	columnsdropped = ['Time','deathtime','casename']
+
+	tempdf = df.iloc[i:i+timesperbatch] #e.g., df.iloc[1:3] will return 2 values, so indexing is fine
+	tempdf = tempdf.drop(columns=columnsdropped) #drops above columns
+	temparray = tempdf.values
+	temparray = temparray.astype('float64')
+	return temparray #now ndarray w/ metadata removed, w/ label as last column
+
+def makebatchfromdf2(timesperbatch,i):
+	# PURPOSE: take i through next timesperbatch - 1 cases in df
+	# Returns: a 1 x timesperbatch vector containing indices
+	indices = list(range(i,i+timesperbatch))
+	return np.asarray(indices)
+
+def applyrollingwindows(df, timesperbatch):
+	'''
+	PURPOSE: take a df of mxn windows and break it into rolling windows
+	#INPUT: df in shape m x n
+	#OUTPUT: df in shape [timestamps, features, batch] where # timestamps = timesperbatch
+	'''
+	numcolremoved = 3 #number of columns deleted from dataframe. Currently: Time, deathtime, casename
+	outputcolumns = df.shape[1]-numcolremoved # number output columns
+	outputndarray = np.ndarray([timesperbatch,outputcolumns,0])
+	for i in range(df.shape[0]-timesperbatch+1): #for indexing, note i will start at i=0
+		if df.iloc[i+timesperbatch-1]['Time'] - df.iloc[i]['Time'] == pd.Timedelta(str(timesperbatch-1)+"m"): #if contiguous string of times
+			try:
+				tempbatch = makebatchfromdf(df,timesperbatch,i) #tempbatch is a [timestamps, features] ndarray
+				outputndarray = np.dstack([outputndarray,tempbatch]) #adds along third dimension
+			except:
+				print("Error, suspect timestamp-related typo in data, skipping this example")
+				os._exit()
+
+
+	return outputndarray
+
+def rearrangeaxes(array):
+	#PURPOSE: Arrange axes
+	#INPUT: array in [timestamps,features,batch]
+	#OUTPUT: array in [batch,timestamp,features]
+	array = np.swapaxes(array,2,0) #array is now batch, features, timestamps
+	array = np.swapaxes(array,2,1) #array is now batch, timestamps, features
+	return array
+
+
+
+def reshapedfforfeed(df,timesperbatch):
+	'''
+	Purpose: Reshape df for feed into KERAS
+	INPUT: df, m x n dataframe wherein all casenums are pooled together
+	INPUT: timesperbatch, number of contiguous timestamps in a single batch
+	OUTPUT: df in shape [sample, timestamp, features]
+	Methods: Build contiguous series, dstack into a [timestamp, feature, sample] distribution, then use swapaxes to re-arrange
+
+	'''
+	windowedarray = applyrollingwindows(df, timesperbatch) #windowedarray is [timestamps, features,batch] ndarray
+
+	#swap axes for windowedarray
+	outputndarray = rearrangeaxes(windowedarray) #outputndarray is batch, timestamp, features w/ last col label and no metadata
+
+	return outputndarray
+
+def normalizecasedf(df):
+	#PURPOSE: normalizes the data along the rows
+	#INPUT: casedf, has casenums, labels, time, timeofdeath
+	#INPUT relevant labels:
+	#OUTPUT: normalized data
+	# df.apply(lambda x: (x - np.mean(x)) / (np.std(x))
+	colstoexclude = ['Time','casename','deathtime',df.columns[-1]] #where -1th column is label
+	df2 = df.drop(colstoexclude, axis=1)
+	x = df2.values
+	scaler = preprocessing.StandardScaler()
+	x_scaled = scaler.fit_transform(x)
+	df2[:] = x_scaled
+	df3 = pd.concat([df2,df[colstoexclude]],axis=1)
+	print("normalizedcasedf shape before dropping rows w/ NA is "+str(df3.shape))
+	df3 = df3.dropna(axis=0) #for some reason df3 may have redundant columns
+	print("normalized casedf shape after dropping na rows is "+str(df3.shape))
+	print("normalized casedf columns are "+str(df3.columns))
+	return df3
+
+
+
+def savedftodisk2(df, offset, timesperbatch):
+	# PURPOSE: Takes traindf or testdf, creates indices of adjacent rows
+	# INPUT: df, traindf or testdf, with Time, deathtime, casename as well as label in -1th col
+	# INPUT: timesperbatch, number of time steps in run
+	# OUTPUT: caselist, an m x timesperbatch matrix where every row contains timesperbatch adjacent indices from traindf
+	# OUTPUT: counter, to be used for dimension
+	m = offset
+	counter = 0
+	caselist = np.ndarray([0,timesperbatch]) #a list of indices from df that contain adjacent segments to query
+	for i in range(len(df)-timesperbatch+1): #row-wise iteration
+		if df.iloc[i+timesperbatch-1]['Time'] - df.iloc[i]['Time'] == pd.Timedelta(str(timesperbatch-1)+"m"): #if contiguous string of times
+			#batchtemp = makebatchfromdf2(timesperbatch,i) #can delete this later if next step compiles
+			caselist = np.vstack((caselist,makebatchfromdf2(timesperbatch,i)))
+			counter = counter + 1
+	return caselist, counter
+
+def savedftodisk(df, offset, timesperbatch):
+	# Purpose: Takes traindf or testdf, saves individual sets of time to disk
+	# INPUT: df - traindf or testdf, with Time, deathtime, casename which need to be dropped, label in -1th col
+	# INPUT: offset, for offsetting index
+	# INPUT: timesperbatch, number of time steps in a run
+	# OUTPUT: saves cases from offset to offset+m as i.npy
+	# OUTPUT: returns counter, to be used for dimension
+	m = offset
+	counter = 0
+	labels = {}
+	for i in range(len(df)-timesperbatch+1): #row-wise iteration
+		if df.iloc[i+timesperbatch-1]['Time'] - df.iloc[i]['Time'] == pd.Timedelta(str(timesperbatch-1)+"m"): #if contiguous string of times
+
+			batchname = str(m)
+			tempbatch = makebatchfromdf(df,timesperbatch,i) #tempbatch is a [timestamps, features+label] ndarray, metadata gone
+
+			mthlabels = tempbatch[:,-1]
+			mthdata = tempbatch[:,0:-1] #excludes last column, which has labels
+			savenpy(mthdata,batchname) #save xs, note it's labeled 
+			labels[batchname] = mthlabels #save labels
+
+			m = m+1 #increment m only if condition met
+			counter = counter+1 #increment counter only if condition met
+
+
+	return m, counter, labels
+
+
+def generatepartition(numtraincases,numtestcases):
+	#PURPOSE: Generates partition, a dict in format {'train'://train-ids in list, 'test'://test-ids in list}
+	#INPUT: TRAINDF, TESTDF
+	partition = dict.fromkeys(['train','validation'])
+	partition['train'] = list(range(numtraincases)) # traindf will be saved first, making up cases 0 to traindfcount-1
+	partition['validation'] = list(range(numtraincases, numtestcases)) #testdf will be saved next, from cases traindfcouunt to testdfcount - 1
+	return partition
+
+def generateclassweights(traindf):
+	#PURPOSE: Generates class weights based on proportion of 1s in labels
+	#INPUT: traindf, where labels are in -1th row
+	#traindf is in shape [batch,time stamps, features]
+	#OUTPUT: class_weights, in form {O: 1., 1: {whatever ratio balances}}
+	df = traindf[:,-1]
+	ratioZerotoOne = np.sum(df)/df.size
+	classweightforone = int(np.ceil(1/ratioZerotoOne))
+	class_weights = {0: 1., 1: classweightforone}
+	return class_weights
+
+def generatecontrollerdict(numtraincases,timesperbatch,numtestcases,traindf):
+	#PURPOSE: Generates a dict that contains important parameters for controlling model
+	# - - traindfshape
+	# - - traindflength
+	# - - testdflength
+	# - - classweights
+	traindf = traindf.values #converts traindf to numpy
+	numcolsremoved = 4 #remove Time, deathtime, casename, label
+	traindfnumfeatures = traindf.shape[1] - numcolsremoved #traindf is in shape steps x features+label+metadata
+	dict = {}
+	dict['traindfshape'] = [numtraincases,timesperbatch,traindfnumfeatures] #batch, timesteps, features
+	dict['traindflength'] = numtraincases
+	dict['testdflength'] = numtestcases
+	dict['classweights'] = generateclassweights(traindf)
+	return dict
+
+def checkpointbeforesavetestdf(traindf,testdf,traindflabels,numtraincases):
+	#Occurs after training cases written, before test cases written
+	#PURPOSE: BC memory keeps maximizing and operation fails otherwise
+	#SAVED: traindf, testdf, traindflabels, numtraincases
+	savedf(traindf,"traindf")
+	savedf(testdf,"testdf")
+	pickledict(traindflabels,"traindflabels")
+	savenpy(numtraincases,"numtraincases")
+
+def loadcheckpointbeforesavetestdf():
+	#Purpose: Loads data saved from checkpointbeforesavetestdf
+	#LOADS: ONLY testdf, dict traindflabels, ndarray numtraincases
+	testdf = pd.read_pickle('testdf.pkl')
+	traindflabels = loadpickle("traindflabels")
+	numtraincases = loadnpy('numtraincases')
+	return testdf, traindflabels, numtraincases
+
+
+
+
+def main():
+	cwd = os.getcwd()
+	datadir = cwd + str("/data")
+
+	if os.path.isfile('traindf.pkl'):
+		traindfnotsaved = False
+	else:
+		traindfnotsaved = True
+
+	if traindfnotsaved:
+		print("traindf not already saved")
+
+		if os.path.isfile('normalizedcasedf.pkl'):
+			casedf = pd.read_pickle('normalizedcasedf.pkl')
+			casenumlabels = np.load('casenumlabels.npy')
+			print("normalizedcasecasedf loaded")
+		else:
+			print("will generate normalizedcasedf")
+			changedirectory() #Takes you to cardiac death folder
+			casedf, casenumlabels = protobuff(cwd) #Generate database w/casenums, timeofdeath, no whitespace, has no 0/1 labels
+			# casedf has:
+			# - Casenums
+			# - timeofdeath
+			# - white space removed
+			# - DOES NOT HAVE LABELS
+			# - STILL HAS CASES AFTER DEATH OCCURRED
+			os.chdir(cwd)
+			savedf(casedf,"casedfbeforeremovetimeafterdeath")
+			print("saved casedf before removing times from death")
+			print("casedf shape is "+str(casedf.shape))
+			casedf = removetimesafterdeath(casedf)
+			casedf = labeldata(casedf,"death90min",90)
+			#case df has:
+			# casenums
+			# timeofdeath
+			# labels
+			# no cases after death
+			# no white space
+			print("case df shape after removing times and labeling: "+str(casedf.shape))
+			casedf = normalizecasedf(casedf)
+			savedf (casedf,"normalizedcasedf")
+			savenpy(casenumlabels,'casenumlabels')
+
+
+	casetestfraction = 0.3 # % cases that go to TEST set
+	ctrltestfraction = 0.3 # % ctrls that go to TEST set
+	timesperbatch = 60 #number of contiguous timesteps per batch
+
+
+	#ctrl + / comments in and out sections of text. This is from prior version.
+
+	debugNabug = False
+	if not debugNabug:
+
+		if traindfnotsaved:
+			print("traindf not already saved")
+
+			traindflabels, testdflabels = separatelabels(casenumlabels,casetestfraction,ctrltestfraction) #BUG i later use traindflabels differently
+			# traindf, testdf are divisions of casedf
+			traindf, testdf = splitcasedf(casedf,traindflabels,testdflabels)
+			print("traindf, test df generated")
+			print("traindf times labeled 1: "+str(traindf[traindf.columns[-1]].sum()))
+			print("testdf times labeled 1: "+str(testdf[testdf.columns[-1]].sum()))
+			os.chdir(datadir)
+			print("starting to save files to disk")
+			numtraincases, traincounter, traindflabels = savedftodisk(traindf,0,timesperbatch) #for windows of 50 
+			print("trainingcases saved to disk")
+			print("number of training cases: "+str(numtraincases))
+
+			os.chdir(cwd)
+			checkpointbeforesavetestdf(traindf,testdf,traindflabels,numtraincases)
+			os.chdir(datadir)
+		else:
+			print("traindf already saved, will upload intermediary files")
+			os.chdir(cwd)
+			testdf, traindflabels, numtraincases = loadcheckpointbeforesavetestdf()
+			os.chdir(datadir)
+
+		numtestcases, testcounter, testdflabels = savedftodisk(testdf,numtraincases,timesperbatch)
+		print("test cases saved to disk")
+		# if there're 50 training cases, they'll be files 0-49, m will return as 50, and 50 will be name of first testcase
+		# hence why it's indexed this way
+		labels = {**traindflabels, **testdflabels}
+		os.chdir(cwd)
+		pickledict(labels,"labels")
+		partition = generatepartition(numtraincases,numtestcases)
+		pickledict(partition,"partition")
+
+		if traindfnotsaved:
+			controllerdict = generatecontrollerdict(numtraincases,timesperbatch,numtestcases,traindf)
+			pickledict(controllerdict,"controllerdict")
+		else:
+			traindf = pd.read_pickle('traindf.pkl')
+			controllerdict = generatecontrollerdict(numtraincases,timesperbatch,numtestcases,traindf)
+			pickledict(controllerdict,"controllerdict")
+
+
+		# traindf = reshapedfforfeed(traindf,timesperbatch) #is now in batch, timestamp, features shape w/ label as final feature
+		# testdf = reshapedfforfeed(testdf,timesperbatch) #is now in sample, timestamp, features shape w/ label as final feature
+		# os.chdir(cwd)
+		# np.save('traindf',traindf)
+		# np.save('testdf',testdf)
+		# savedf(casedf,'casedf') #save casedf for debugging
+		# print("dfs saved")
+		# print("traindf shape "+str(traindf.shape))
+		# print("testdf shape "+str(testdf.shape))
+
+
+if __name__ == '__main__': main()
