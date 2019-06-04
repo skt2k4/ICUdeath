@@ -1,0 +1,230 @@
+import os
+import tensorflow as tf
+import pickle
+import keras
+from keras.models import Sequential, load_model
+from keras.layers import Dense, Activation, Embedding, Dropout, TimeDistributed
+from keras.layers import LSTM
+from keras.optimizers import Adam
+from keras.utils import to_categorical
+from keras.callbacks import ModelCheckpoint
+from keras import backend as K
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
+
+
+class KerasBatchGenerator(keras.utils.Sequence):
+
+	def __init__(self, list_IDs, labels, num_steps, numfeatures, batch_size, numlabelcats, skip_step=1, shuffle=True):
+		self.list_IDs = list_IDs
+		self.labels = labels
+		self.shuffle = shuffle
+		self.num_steps = num_steps #number of timestamps submitted at once
+		self.batch_size = batch_size #batch size
+		self.numfeatures = numfeatures
+		self.numlabelcats = numlabelcats #number of types of labels, in this case 2 b/c either 0 or 1
+		# this will track the progress of the batches sequentially through the
+		# data set - once the data reaches the end of the data set it will reset
+		# back to zero
+		self.current_idx = 0
+		# skip_step is the number of words which will be skipped before the next
+		# batch is skimmed from the data set
+		self.skip_step = skip_step
+		self.on_epoch_end()
+
+	def __len__(self):
+		#Number of batches per epoch
+		return int(np.floor(len(self.list_IDs)/self.batch_size))
+
+	def __getitem__(self, index):
+		'Generate one batch of data'
+		indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
+
+		# Find list of IDs
+		list_IDs_temp = [self.list_IDs[k] for k in indexes]
+
+		# Generate data
+		X, y = self.__data_generation(list_IDs_temp)
+		return X, y
+
+	def on_epoch_end(self):
+		'Updates indexes after each epoch'
+		self.indexes = np.arange(len(self.list_IDs))
+		if self.shuffle == True:
+			np.random.shuffle(self.indexes)
+
+	def __data_generation(self, list_IDs_temp):
+		'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
+		# Initialization
+		X = np.zeros((self.batch_size, self.num_steps, self.numfeatures))
+		y = np.zeros((self.batch_size, self.num_steps, 1))
+
+		# Generate data
+		for i, ID in enumerate(list_IDs_temp):
+			# Store sample
+			X[i,] = np.load('data/' + str(ID) + '.npy')# DEBUG: Fixed prior bug where data had labels so needed [:,0:-1]
+			# Store class
+			ytemp = self.labels[str(ID)] #is in shape timestamps, will reshape into timestamps x 1
+			y[i] = np.reshape(ytemp,[ytemp.shape[0],1])
+
+		return X, keras.utils.to_categorical(y, num_classes=self.numlabelcats)
+
+
+
+def truesn(y_true, y_pred):
+	#y_true_ndarray = K.eval(K.clip(y_true,0,1))
+	#y_pred_ndarray = K.eval(K.clip(y_pred,0,1))
+	#shape = K.shape(y_true)
+	#tensorzero = K.cast(K.zeros([1]), 'int32')
+	#tensorone = K.cast(K.ones([1]), 'int32')
+	#numrows = K.slice(shape,[0],[1]) #single value of number of rows
+	#zeros = K.zeros_like(numrows) #single value of 0
+	#ones = K.ones_like(numrows) #single value of 1
+	#allyes = K.stack([numrows,tensorone],axis=1)#[numrows, 1] #<-- WHERE CODE BROKEN
+	#allno = K.stack([numrows,tensorzero],axis=1) #[numrows, 0]
+	y_true = K.batch_flatten(y_true)
+	y_pred = K.batch_flatten(y_pred)
+	y_pred_yes = K.slice(y_pred,[0,1],[-1,1])
+	y_pred_no = K.slice(y_pred,[0,0],[-1,1])
+	y_true_yes = K.slice(y_true,[0,1],[-1,1])
+	y_true_no = K.slice(y_true,[0,0],[-1,1])
+
+	true_positives = K.sum(y_true_yes)	#true_positives = np.sum(y_true_ndarray[:,1])
+	false_negatives = K.dot(y_pred_no,K.transpose(y_true_yes))
+
+	#false_negatives = K.sum(K.dot(K.gather(y_pred,allno), K.gather(y_true,allyes)))#false_negatives = np.sum(np.multiply(y_pred_ndarray[:,0],y_true_ndarray[:,1]))
+	return true_positives / (true_positives+false_negatives + K.epsilon())
+
+
+def ppv(y_true,y_pred):
+	#y_true_ndarray = K.eval(K.clip(y_true,0,1))
+	#y_pred_ndarray = K.eval(K.clip(y_pred,0,1))
+	#shape = K.shape(y_true)
+	#tensorzero = K.cast(K.zeros([1]), 'int32')
+	#tensorone = K.cast(K.ones([1]), 'int32')
+	#numrows = K.slice(shape,[0],[1]) #single value of number of rows
+	#numrowsint = K.get_value(numrows)
+	#zeros = K.zeros_like(numrows) #single value of 0
+	#ones = K.ones_like(numrows) #single value of 1
+	#allyes = K.stack([numrows,tensorone],axis=1)#[numrows, 1] #<-- WHERE CODE BROKEN
+	#allno = K.stack([numrows,tensorzero],axis=1) #[numrows, 0]
+	y_true = K.batch_flatten(y_true)
+	y_pred = K.batch_flatten(y_pred)
+	y_pred_yes = K.slice(y_pred,[0,1],[-1,1])
+	y_pred_no = K.slice(y_pred,[0,0],[-1,1])
+	y_true_yes = K.slice(y_true,[0,1],[-1,1])
+	y_true_no = K.slice(y_true,[0,0],[-1,1])
+
+	true_positives = K.sum(y_true_yes)	#true_positives = np.sum(y_true_ndarray[:,1])
+	false_positives = K.dot(y_pred_yes,K.transpose(y_true_no))
+	#false_positives = K.sum(K.dot(K.gather(y_pred,allyes), K.gather(y_true,allno)))#false_negatives = np.sum(np.multiply(y_pred_ndarray[:,0],y_true_ndarray[:,1]))
+
+	#false_positives = K.sum(K.dot(y_pred[:,1],y_true[:,0])) #false_positives = np.sum(np.multiply(y_pred_ndarray[:,1],y_true_ndarray[:,0]))
+	#denom = true_positives + false_positives + K.epsilon()
+	#denom = 1/denom
+
+	return true_positives / (true_positives + false_positives + K.epsilon())
+
+
+def npv (y_true, y_pred):
+	y_true = K.batch_flatten(y_true)
+	y_pred = K.batch_flatten(y_pred)
+	y_pred_yes = K.slice(y_pred,[0,1],[-1,1])
+	y_pred_no = K.slice(y_pred,[0,0],[-1,1])
+	y_true_yes = K.slice(y_true,[0,1],[-1,1])
+	y_true_no = K.slice(y_true,[0,0],[-1,1])
+
+	true_negatives = K.sum(y_true_no)	#true_positives = np.sum(y_true_ndarray[:,1])
+	false_negatives = K.dot(y_
+		pred_no,K.transpose(y_true_yes))
+	return true_negatives / (true_negatives + false_negatives + K.epsilon())
+
+def sensitivity(y_true, y_pred):
+	true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+	possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+	return true_positives / (possible_positives + K.epsilon())
+
+def specificity(y_true, y_pred):
+	true_negatives = K.sum(K.round(K.clip((1-y_true) * (1-y_pred), 0, 1)))
+	possible_negatives = K.sum(K.round(K.clip(1-y_true, 0, 1)))
+	return true_negatives / (possible_negatives + K.epsilon())
+
+def loadpickle(filename):
+	#PURPOSE: Loads pickle from same directory
+	#INPUT: file name
+	#OUTPUT: the unpickled file
+	pickledfile = pickle.load( open( filename, "rb" ) )
+	return pickledfile
+
+def loaddata():
+	#Purpose: load labels, partition
+	#INPUT: none
+	#OUTPUT: labels, partition
+	#traindf = np.load('traindf.npy')
+	#testdf = np.load('testdf.npy')
+	controllerdict = loadpickle('controllerdict')
+	labels = loadpickle('labels')
+	partition = loadpickle('partition')
+	return controllerdict, labels, partition
+
+def generateclassweights(traindf):
+	#PURPOSE: Generates class weights based on proportion of 1s in labels
+	#INPUT: traindf, where labels are in -1th row
+	#traindf is in shape [batch,time stamps, features]
+	#OUTPUT: class_weights, in form {O: 1., 1: {whatever ratio balances}}
+	df = traindf[:,:,-1]
+	ratioZerotoOne = np.sum(df)/df.size
+	classweightforone = int(np.ceil(1/ratioZerotoOne))
+	class_weights = {0: 1., 1: classweightforone}
+	return class_weights
+
+
+def main():
+	controllerdict, labels, partition = loaddata()
+	cwd = os.getcwd()
+	datadir = cwd+str('/data')
+	#os.chdir(datadir)
+
+
+	num_steps = controllerdict['traindfshape'][1]
+	batch_size = 32
+	numlabelcats = 2
+	numfeatures = controllerdict['traindfshape'][2]
+	train_data_generator = KerasBatchGenerator(list_IDs = partition['train'], labels=labels, num_steps=num_steps, numfeatures=numfeatures, batch_size=batch_size, numlabelcats=numlabelcats, skip_step=1)
+ 
+	hidden_size = 2
+	use_dropout=True
+
+	model = Sequential()
+	#model.add(Embedding(numlabelcats, hidden_size, input_length=num_steps))
+	model.add(LSTM(hidden_size, use_bias = True, unit_forget_bias = 1, dropout=0.5, return_sequences=True, input_shape=(num_steps,numfeatures)))
+	#model.add(LSTM(hidden_size, return_sequences=True))
+	#model.add(LSTM(hidden_size, return_sequences=True))
+	#model.add(LSTM(hidden_size, return_sequences=True))
+	if use_dropout:
+	    model.add(Dropout(0.5))
+	'''model.add(TimeDistributed(Dense(numlabelcats)))'''
+	model.add(Dense(2, activation='softmax'))
+
+	optimizer = Adam()
+
+	my_class_weight = controllerdict['classweights'] #if error and need backup, use {0: 1., 1: 250.}
+	model.compile(loss='categorical_crossentropy', optimizer='adam', weighted_metrics = my_class_weight, metrics=['categorical_accuracy', sensitivity, specificity, truesn, ppv, npv])
+
+	print(model.summary())
+	#checkpointer = ModelCheckpoint('/model-{epoch:02d}.hdf5', verbose=1)
+	num_epochs = 30
+
+
+	model.fit_generator(train_data_generator, controllerdict['traindflength'], num_epochs, 
+						validation_data=valid_data_generator,
+						validation_steps=controllerdict['testdflength'], verbose = 1)
+
+	os.chdir(cwd)
+	model.save("final_model.hdf5")
+	print("model saved")
+
+
+
+
+if __name__ == '__main__': main()
